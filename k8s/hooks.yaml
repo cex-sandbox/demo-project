@@ -1,0 +1,63 @@
+# Argo CD sync hooks — cổng bảo mật quanh mỗi lần deploy (Phase 3).
+# PreSync: Trivy scan image trước khi deploy (báo CVE).
+# PostSync: smoke test xác nhận app phục vụ sau khi deploy.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: presync-trivy-scan
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: trivy
+          image: aquasec/trivy:0.71.1
+          # Báo CVE HIGH/CRITICAL của image sắp deploy. Thêm "--exit-code 1 --severity CRITICAL"
+          # để biến thành cổng chặn cứng (PreSync fail → Argo CD dừng sync).
+          args:
+            - image
+            - --scanners=vuln
+            - --severity=HIGH,CRITICAL
+            - --no-progress
+            - --timeout=5m
+            - nginxinc/nginx-unprivileged:1.27-alpine
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postsync-smoke-test
+  namespace: demo
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: smoke
+          image: curlimages/curl:8.11.1
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          args:
+            - -sSf
+            - --max-time
+            - "10"
+            - http://demo-web.demo.svc.cluster.local/
